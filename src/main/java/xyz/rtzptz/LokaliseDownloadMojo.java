@@ -16,20 +16,20 @@ package xyz.rtzptz;
  * limitations under the License.
  */
 
-import org.apache.maven.model.Dependency;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
-import org.apache.maven.project.MavenProject;
 
 import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.Files;
-import java.util.List;
+import java.nio.file.Paths;
+import java.util.*;
 import java.util.zip.ZipInputStream;
 
 /**
@@ -37,13 +37,7 @@ import java.util.zip.ZipInputStream;
  */
 @Mojo(name = "download-translations", defaultPhase = LifecyclePhase.INSTALL)
 public class LokaliseDownloadMojo
-    extends AbstractMojo
-{
-    /**
-     * Get access to the parent project.
-     */
-    @Parameter(defaultValue = "${project}", required = true, readonly = true)
-    MavenProject project;
+        extends AbstractMojo {
 
     /**
      * The lokalise API key,
@@ -60,11 +54,14 @@ public class LokaliseDownloadMojo
     private String projectId;
 
     /**
-     * Set the language codes which should be downloaded from lokalise.
+     * Set the language codes which should be downloaded from lokalise or '*' for all translations.
      * For each language code an individual java properties file is downloaded.
      */
-    @Parameter(property = "languageCodes", required = true)
+    @Parameter(property = "languageCodes", required = false)
     private String languageCodes;
+
+    @Parameter(property = "filePrefix", required = false, defaultValue = "")
+    private String filePrefix;
 
     /**
      * Set the directory where the downloaded java property files should be stored.
@@ -72,59 +69,99 @@ public class LokaliseDownloadMojo
     @Parameter(property = "outputDir", defaultValue = "${project.basedir}/src/main/resources/i18n")
     private File outputDir;
 
- public void execute() throws MojoExecutionException {
-     try {
-         String[] langs = languageCodes.split(",");
-         for (String lang : langs) {
-             getLog().info("Fetching translations for language: " + lang);
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-             URL url = new URL("https://api.lokalise.com/api2/projects/" + projectId + "/files/download");
-             String body = String.format(
-                     "{\"format\":\"properties\",\"original_filenames\":false,\"filter_langs\":[\"%s\"]}",
-                     lang.trim()
-             );
+    public void execute() throws MojoExecutionException {
+        try {
+            List<String> langs = resolveLanguages();
 
-             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-             conn.setRequestMethod("POST");
-             conn.setRequestProperty("X-Api-Token", apiToken);
-             conn.setRequestProperty("Content-Type", "application/json");
-             conn.setDoOutput(true);
-             conn.getOutputStream().write(body.getBytes());
+            getLog().info("Requesting Lokalise bundle for languages: " + langs);
+            String bundleUrl = requestDownloadUrl(langs);
+            if (bundleUrl == null) throw new MojoExecutionException("bundle_url not found");
 
-             BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-             String line, bundleUrl = null;
-             while ((line = in.readLine()) != null) {
-                 if (line.contains("bundle_url")) {
-                     bundleUrl = line.replaceAll(".*\"bundle_url\"\\s*:\\s*\"(.*?)\".*", "$1").replace("\\/", "/");
-                     break;
-                 }
-             }
-             in.close();
+            HttpURLConnection zipConn = (HttpURLConnection) new URL(bundleUrl).openConnection();
+            try (ZipInputStream zipIn = new ZipInputStream(zipConn.getInputStream())) {
+                Files.createDirectories(outputDir.toPath());
 
-             if (bundleUrl == null) {
-                 throw new MojoExecutionException("bundle_url not found in Lokalise response");
-             }
+                java.util.zip.ZipEntry entry;
+                while ((entry = zipIn.getNextEntry()) != null) {
+                    if (!entry.isDirectory()) {
+                        String originalName = Paths.get(entry.getName()).getFileName().toString(); // e.g., de.properties
+                        String langCode = originalName.replace(".properties", "");
+                        String fileName = filePrefix + langCode + ".properties";
+                        File outFile = new File(outputDir, fileName);
 
-             // Download ZIP and extract
-             HttpURLConnection zipConn = (HttpURLConnection) new URL(bundleUrl).openConnection();
-             try (ZipInputStream zipIn = new ZipInputStream(zipConn.getInputStream())) {
-                 Files.createDirectories(outputDir.toPath());
+                        try (FileOutputStream out = new FileOutputStream(outFile)) {
+                            zipIn.transferTo(out);
+                        }
+                        getLog().info("Saved: " + outFile.getAbsolutePath());
+                    }
+                    zipIn.closeEntry();
+                }
+            }
 
-                 java.util.zip.ZipEntry entry;
-                 while ((entry = zipIn.getNextEntry()) != null) {
-                     if (!entry.isDirectory()) {
-                         File outFile = new File(outputDir, lang + ".properties");
-                         try (FileOutputStream out = new FileOutputStream(outFile)) {
-                             zipIn.transferTo(out);
-                         }
-                         getLog().info("Saved: " + outFile.getAbsolutePath());
-                     }
-                     zipIn.closeEntry();
-                 }
-             }
-         }
-     } catch (Exception e) {
-         throw new MojoExecutionException("Failed to fetch Lokalise translations", e);
-     }
- }
+        } catch (Exception e) {
+            throw new MojoExecutionException("Lokalise download failed", e);
+        }
+    }
+
+    private List<String> resolveLanguages() throws IOException, MojoExecutionException {
+        if (languageCodes == null || languageCodes.trim().isEmpty() || languageCodes.trim().equals("*")) {
+            getLog().info("Fetching all language codes from Lokalise...");
+            URL url = new URL("https://api.lokalise.com/api2/projects/" + projectId + "/languages");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestProperty("X-Api-Token", apiToken);
+            conn.setRequestProperty("Content-Type", "application/json");
+
+            try (InputStream in = conn.getInputStream()) {
+                JsonNode root = objectMapper.readTree(in);
+                List<String> allLangs = new ArrayList<>();
+                for (JsonNode langNode : root.get("languages")) {
+                    allLangs.add(langNode.get("lang_iso").asText());
+                }
+                return allLangs;
+            }
+        } else {
+            return Arrays.asList(languageCodes.split(","));
+        }
+    }
+
+    private String requestDownloadUrl(List<String> langs) throws IOException {
+        URL url = new URL("https://api.lokalise.com/api2/projects/" + projectId + "/files/download");
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setRequestProperty("X-Api-Token", apiToken);
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setRequestProperty("Accept", "application/json");
+        conn.setDoOutput(true);
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("format", "properties");
+        body.put("original_filenames", false);
+        body.put("all_platforms", true);
+        body.put("bundle_structure", "%LANG_ISO%");
+        body.put("plural_format", "json_string");
+        body.put("placeholder_format", "printf");
+
+
+
+        body.put("filter_langs", langs);
+
+        String jsonBody = objectMapper.writeValueAsString(body);
+        conn.getOutputStream().write(jsonBody.getBytes());
+
+        if (conn.getResponseCode() >= 400) {
+            try (InputStream err = conn.getErrorStream()) {
+                String msg = new String(err.readAllBytes());
+                getLog().error("Lokalise API error: " + msg);
+            }
+            throw new IOException("Lokalise API returned HTTP " + conn.getResponseCode());
+        }
+        else {
+            try (InputStream in = conn.getInputStream()) {
+                JsonNode root = objectMapper.readTree(in);
+                return root.has("bundle_url") ? root.get("bundle_url").asText() : null;
+            }
+        }
+    }
 }
