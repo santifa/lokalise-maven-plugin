@@ -58,16 +58,16 @@ public class LokaliseDownloadMojo
      * For each language code an individual java properties file is downloaded.
      */
     @Parameter(property = "languageCodes", required = false)
-    private String languageCodes;
+    String languageCodes;
 
     @Parameter(property = "filePrefix", required = false, defaultValue = "")
-    private String filePrefix;
+    String filePrefix;
 
     /**
      * Set the directory where the downloaded java property files should be stored.
      */
     @Parameter(property = "outputDir", defaultValue = "${project.basedir}/src/main/resources/i18n")
-    private File outputDir;
+    File outputDir;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
