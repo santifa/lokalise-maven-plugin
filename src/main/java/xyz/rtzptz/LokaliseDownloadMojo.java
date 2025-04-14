@@ -63,6 +63,9 @@ public class LokaliseDownloadMojo
     @Parameter(property = "filePrefix", required = false, defaultValue = "")
     String filePrefix;
 
+    @Parameter(property = "placeholderFormat", required = false, defaultValue = "printf")
+    String placeholderFormat;
+
     /**
      * Set the directory where the downloaded java property files should be stored.
      */
@@ -141,7 +144,7 @@ public class LokaliseDownloadMojo
         body.put("all_platforms", true);
         body.put("bundle_structure", "%LANG_ISO%");
         body.put("plural_format", "json_string");
-        body.put("placeholder_format", "printf");
+        body.put("placeholder_format", placeholderFormat);
 
 
 
